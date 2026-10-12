@@ -1,178 +1,195 @@
-AWS Web Application — Request Flow
+# AWS Web Application — Request Flow
 
-1. Purpose
+> **Project:** AWS High-Traffic Web Application  
+> **Region:** Asia Pacific (Mumbai) — `ap-south-1`  
+> **Live website:** [https://techwithshiva.in](https://techwithshiva.in)
 
-This document explains how a user request travels through the AWS High-Traffic Web Application infrastructure.
+## 1. Overview
 
-Live application: https://techwithshiva.in
+This document explains how a request travels from a user's browser through AWS networking and content delivery services to the EC2 instances serving the application.
 
-2. High-Level Traffic Flow
+The architecture combines DNS resolution, HTTPS delivery, load balancing, health checks, auto scaling configuration, and monitoring.
 
-User / Browser
-      |
-      | HTTPS request
-      v
-Amazon Route 53
-      |
-      | DNS resolution
-      v
-Amazon CloudFront
-      |
-      | Forward request according to cache behavior
-      v
-Application Load Balancer
-      |
-      v
-EC2 Target Group
-      |
-      +-------------------+
-      |                   |
-      v                   v
-EC2 Instance A       EC2 Instance B
-Nginx                Nginx
+## 2. Request Flow Architecture
 
-The Auto Scaling Group manages EC2 capacity. CloudWatch monitors configured metrics and evaluates alarms.
+```text
+                 USER / BROWSER
+                       |
+                  HTTPS : 443
+                       |
+                       v
+                AMAZON ROUTE 53
+                 DNS resolution
+                       |
+                       v
+                AMAZON CLOUDFRONT
+                 CDN / Edge Cache
+                       |
+                Configured origin
+                       |
+                       v
+             APPLICATION LOAD BALANCER
+                    HTTP : 80
+                       |
+                       v
+                 TARGET GROUP
+                  Health checks
+                    Path: /
+                       |
+              +--------+--------+
+              |                 |
+              v                 v
+        EC2 INSTANCE A    EC2 INSTANCE B
+             Nginx             Nginx
+              |                 |
+              +--------+--------+
+                       |
+                 HTML Response
 
-3. Request Lifecycle
+        Supporting Services:
+        Auto Scaling Group + Amazon CloudWatch
+```
 
-Step 1 — User accesses the application
+**Important:** Route 53 resolves the domain; it does not proxy application traffic. CloudFront can serve a cached response or forward the request to its configured origin. The default behavior in this project routes requests to the Application Load Balancer.
 
-The user opens:
+## 3. How the Request Works
 
-https://techwithshiva.in
+### Step 1 — User accesses the website
 
-The browser initiates an HTTPS request.
+The user opens [https://techwithshiva.in](https://techwithshiva.in).
 
-Step 2 — Route 53 resolves the domain
+The browser initiates an HTTPS request to the website.
 
-Amazon Route 53 hosts the public DNS records for the custom domain.
+### Step 2 — Route 53 resolves the domain
 
-The domain's alias record directs users to the CloudFront distribution.
+Amazon Route 53 hosts the public DNS records for `techwithshiva.in`.
 
-Route 53 performs DNS resolution; it does not proxy the user's HTTP request.
+The domain's alias record directs the user to the CloudFront distribution.
 
-Step 3 — CloudFront receives the request
+### Step 3 — CloudFront processes the request
 
-Amazon CloudFront acts as the content delivery layer.
+Amazon CloudFront provides content delivery and caching.
 
-It can return a cached response when the configured cache behavior permits it. Otherwise, it forwards the request to the origin selected by that behavior.
+- **Cache hit:** CloudFront can return a cached response.
+- **Cache miss:** CloudFront forwards the request to the origin selected by the matching cache behavior.
 
-For the default behavior in this project, the configured origin is the Application Load Balancer.
+For this project's default behavior, the configured origin is the Application Load Balancer.
 
-Step 4 — The Application Load Balancer receives the request
+The ACM certificate associated with CloudFront supports HTTPS for the custom domain.
 
-The ALB listener receives the forwarded HTTP request on port 80 and evaluates its listener rules.
+### Step 4 — Application Load Balancer distributes traffic
 
-The ALB distributes requests to eligible, healthy registered targets in the target group.
+The ALB receives the forwarded HTTP request on port 80.
 
-Step 5 — The target group evaluates instance health
+It evaluates its listener configuration and sends the request to an eligible, healthy target in the target group.
 
-The target group uses its configured HTTP health check:
+### Step 5 — Target group checks instance health
 
-Protocol: HTTP
+The target group uses HTTP health checks to determine whether registered instances are healthy.
 
-Port: Traffic port
+| Health-check setting | Configuration |
+|---|---|
+| Protocol | HTTP |
+| Port | Traffic port |
+| Path | `/` |
+| Healthy threshold | 5 |
+| Unhealthy threshold | 2 |
+| Timeout | 5 seconds |
+| Interval | 30 seconds |
+| Success code | `200` |
 
-Path: /
+An instance that fails health checks can be marked unhealthy and excluded from normal load-balancer routing.
 
-Healthy threshold: 5
+### Step 6 — EC2 and Nginx serve the response
 
-Unhealthy threshold: 2
+The selected EC2 instance runs Nginx and serves the webpage.
 
-Timeout: 5 seconds
+Both instances should have the same application version so that users receive consistent content regardless of which target handles the request.
 
-Interval: 30 seconds
+### Step 7 — Auto Scaling manages capacity
 
-Success code: 200
+The Auto Scaling Group is configured as follows:
 
-These settings determine how the load balancer evaluates target health. A failed health check can cause a target to be marked unhealthy and excluded from normal routing.
+| Setting | Value |
+|---|---:|
+| Minimum capacity | 2 |
+| Desired capacity | 2 |
+| Maximum capacity | 4 |
+| CPU target tracking | 50% |
+| Instance warm-up | 180 seconds |
 
-Step 6 — Nginx serves the webpage
+The group maintains desired capacity and can add or remove instances according to its scaling policy, workload, and configured limits.
 
-The selected EC2 instance runs Nginx and serves the application HTML.
+These settings describe the configuration; successful scale-out must be confirmed separately using scaling activities, instance changes, and CloudWatch metrics.
 
-Both registered instances should serve the same application version to provide consistent responses regardless of which instance receives the request.
+### Step 8 — CloudWatch supports monitoring
 
-Step 7 — Auto Scaling manages capacity
+Amazon CloudWatch monitors configured metrics and evaluates alarm conditions.
 
-The Auto Scaling Group is configured with:
+The project includes an alarm for low healthy-host count. During an incident, check the alarm state alongside target health, instance status, and Auto Scaling activity.
 
-Setting
+## 4. Troubleshooting: Old Webpage Appearing
 
-Value
+### Incident symptoms
 
-Minimum capacity
+The Application Load Balancer returned the updated webpage, but the custom domain continued to show an older version.
 
-2
-
-Desired capacity
-
-2
-
-Maximum capacity
-
-4
-
-CPU target tracking policy
-
-50%
-
-Instance warm-up
-
-180 seconds
-
-The group maintains its desired capacity and can adjust capacity according to its scaling policies and limits.
-
-The configuration does not by itself prove that a scaling event has occurred. A successful scale-out test should be validated using scaling activities, instance changes, and metrics.
-
-Step 8 — CloudWatch supports monitoring
-
-Amazon CloudWatch collects and evaluates configured metrics and alarm thresholds.
-
-The project includes an alarm for low healthy-host count. Alarm state should be interpreted alongside target health, metrics, and Auto Scaling activity.
-
-4. Troubleshooting Example — Stale CloudFront Content
-
-Observed symptoms
-
-The ALB returned the updated webpage, but the custom domain continued to display an older version.
-
-Diagnostic commands
+### Investigation
 
 Check the ALB response:
 
+```bash
 curl -sS http://high-traffic-alb-1560459725.ap-south-1.elb.amazonaws.com/ \
   | grep -E '<title>|AWS High-Traffic|OK - High Traffic'
+```
 
 Check the public domain:
 
+```bash
 curl -sS https://techwithshiva.in/ \
   | grep -E '<title>|AWS High-Traffic|OK - High Traffic'
+```
 
-Inspect CloudFront response headers:
+Inspect the response headers:
 
+```bash
 curl -sSI https://techwithshiva.in/
+```
 
-Useful headers include X-Cache, Age, Via, ETag, and Last-Modified.
+Useful headers include:
 
-Resolution approach
+| Header | What it helps investigate |
+|---|---|
+| `X-Cache` | Whether CloudFront reports a cache hit or miss |
+| `Age` | How long a cached response has been held |
+| `ETag` | Response version identifier |
+| `Last-Modified` | Origin content modification time |
+| `Via` | Proxy and cache path information |
 
-Confirm that the ALB serves the intended version.
+### Resolution
 
-Verify the CloudFront distribution's origin and default behavior.
+1. Confirm that the ALB returns the intended webpage.
+2. Check the CloudFront distribution's origin and cache behavior.
+3. Review the invalidation status and timing.
+4. If stale content remains, invalidate the relevant CloudFront object path.
+5. Wait for invalidation completion and retest the custom domain.
 
-Review the invalidation status and its creation time.
+### Root-cause lesson
 
-If required, invalidate the relevant CloudFront object paths.
+The observed issue was stale content being returned through CloudFront while the ALB already served the updated page. Compare the origin response with the CDN response before changing the application or EC2 configuration.
 
-Retest the custom domain after the invalidation completes.
+## 5. Key Takeaways
 
-Key lesson
+- **Route 53:** Resolves the custom domain to CloudFront.
+- **CloudFront:** Provides content delivery and caching.
+- **ALB:** Distributes requests among eligible healthy targets.
+- **Target group:** Tracks registered target health.
+- **EC2 and Nginx:** Serve the webpage.
+- **Auto Scaling Group:** Manages EC2 capacity.
+- **CloudWatch:** Supports monitoring and alarm evaluation.
 
-A successful response from the origin does not guarantee that a CDN immediately returns the same content. Compare the origin response, CDN headers, cache configuration, and invalidation timing before deciding on a fix.
+## 6. Interview Explanation
 
-5. Interview Summary
+**Question: Explain the request flow in your AWS project.**
 
-Question: Explain the request flow in your AWS project.
-
-A user accesses the application using the custom HTTPS domain. Route 53 resolves the domain to CloudFront. CloudFront applies the configured cache behavior and forwards uncached requests through its default behavior to the Application Load Balancer. The ALB routes requests to healthy EC2 targets registered in its target group. Nginx serves the webpage. The Auto Scaling Group manages instance capacity, while CloudWatch monitors configured metrics and alarms.
+A user accesses the application through its HTTPS custom domain. Route 53 resolves the domain to CloudFront. CloudFront either returns an eligible cached response or forwards the request to the configured origin. In this project's default behavior, that origin is the Application Load Balancer. The ALB routes requests to healthy EC2 instances registered in its target group, where Nginx serves the webpage. The Auto Scaling Group manages instance capacity, while CloudWatch monitors configured metrics and alarms.
